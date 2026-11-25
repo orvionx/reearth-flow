@@ -7,6 +7,7 @@ import (
 	"github.com/reearth/reearth-flow/api/internal/usecase/gateway"
 	"github.com/reearth/reearth-flow/api/pkg/id"
 	"github.com/reearth/reearth-flow/api/pkg/job"
+	"github.com/reearth/reearth-flow/api/pkg/notification"
 	"github.com/reearth/reearthx/log"
 )
 
@@ -159,8 +160,12 @@ func (i *Job) reloadFinished(ctx context.Context, jobID id.JobID) (*job.Job, err
 	return j, nil
 }
 
-// notificationClaimLease is how long one instance holds a webhook delivery; longer than the notifier's 30s timeout.
-const notificationClaimLease = time.Minute
+const (
+	// notificationPreflightTimeout bounds the log-existence checks before a webhook is sent.
+	notificationPreflightTimeout = 20 * time.Second
+	// notificationClaimLease outlasts the preflight checks plus the notifier's own timeout.
+	notificationClaimLease = notificationPreflightTimeout + notification.SendTimeout + 10*time.Second
+)
 
 // deliverNotification sends an unsent webhook once outputs are listed; a claim keeps instances from sending it twice.
 func (i *Job) deliverNotification(ctx context.Context, j *job.Job) {
@@ -177,7 +182,9 @@ func (i *Job) deliverNotification(ctx context.Context, j *job.Job) {
 	if !claimed {
 		return
 	}
-	if err := i.sendCompletionNotification(ctx, j, *url); err != nil {
+	preflightCtx, cancel := context.WithTimeout(ctx, notificationPreflightTimeout)
+	defer cancel()
+	if err := i.sendCompletionNotification(preflightCtx, j, *url); err != nil {
 		// The claim lapses, so a later reconcile retries.
 		log.Errorfc(ctx, "job: failed to send the completion webhook for job %s: %v", j.ID(), err)
 		return
